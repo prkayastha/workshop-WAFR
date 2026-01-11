@@ -1,0 +1,446 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Not secure not effective 3-Tier web app >-
+  MIT No Attribution
+  Copyright 2024 Amazon Web Services
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so.
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: UnicornApp
+  VpcCIDR:
+    Type: String
+    Default: 10.192.0.0/16
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.192.10.0/24
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.192.11.0/24
+  LatestAmiId:
+    Description: AMI ID
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  DBInstanceIdentifier:
+    Type: String
+    Default: UnicornAppDB
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ1)
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs  '']
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ2)
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Routes
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+  # End of Networking
+
+  # Operational Excellence Pillar
+  # Problem 1: No health checks or monitoring
+  # Problem 2: Lack of logging and traceability
+  # Problem 3: No automated deployment or rollback strategy
+  WebSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable http(80) & ssh(22) access
+      GroupName: WebServer-SG
+      VpcId:  !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+      Tags:
+       - Key: Name
+         Value: !Ref EnvironmentName
+       - Key: Application
+         Value: !Ref EnvironmentName
+
+  # allow local traffic
+  SGIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref WebSG
+      IpProtocol: '-1'
+      FromPort: '-1'
+      ToPort: '-1'
+      SourceSecurityGroupId: !Ref WebSG
+
+  NewKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: UnicornKey
+  # aws ec2 describe-key-pairs --filters Name=key-name,Values=UnicornKey --query KeyPairs[*].KeyPairId --output text
+  # aws ssm get-parameter --name /ec2/keypair/key-05abb699beEXAMPLE --with-decryption --query Parameter.Value --output text > new-key-pair.pem
+
+  # Performance Efficiency Pillar
+  # Problem 1: No auto-scaling in the application tier
+  # Problem 2: Inefficient instance type for the web servers
+  # Problem 3: No caching or content delivery network (CDN) for static assets
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref WebSG
+      KeyName: !Ref NewKeyPair
+      ImageId: !Ref LatestAmiId
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash -xe
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          instanceId=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+          region=$(curl http://169.254.169.254/latest/dynamic/instance-identity/document | grep region | awk -F\" '{print $4}')
+          cat >> /var/www/html/index.html << EOL
+          <html>
+          <head>
+          <title>Unicorn Rental Portal</title>
+          <style>
+          @import url('https://fonts.googleapis.com/css2?family=Parisienne&display=swap');
+          @import url('https://fonts.googleapis.com/css2?family=Abril+Fatface&display=swap');
+          body {
+          font-family: Arial, sans-serif;
+          background-color: #FFCCE7;
+          color: #33001B;
+          margin: 0;
+          padding: 0;
+          }
+          header {
+          background-image: repeating-linear-gradient(
+          45deg,
+          #7D2E8D,
+          #7D2E8D 10%,
+          #DE6FA1 10%,
+          #DE6FA1 20%,
+          #FFCCE7 20%,
+          #FFCCE7 30%,
+          #DE6FA1 30%,
+          #DE6FA1 40%,
+          #7D2E8D 40%,
+          #7D2E8D 50%
+          );
+          animation: nyan-cat 5s linear infinite;
+          color: white;
+          padding: 20px;
+          text-align: center;
+          }
+          @keyframes nyan-cat {
+          0% { background-position: 0 0; }
+          100% { background-position: 100% 0; }
+          }
+          h1 {
+          margin: 0;
+          font-family: 'Parisienne', cursive;
+          font-size: 48px;
+          text-shadow: 2px 2px 4px rgba(255, 255, 255, 0.5);
+          }
+          p {
+          font-size: 18px;
+          text-align: center;
+          }
+          table {
+          width: 100%;
+          border-collapse: collapse;
+          margin-top: 20px;
+          }
+          th {
+          background-color: #7D2E8D;
+          color: white;
+          padding: 10px;
+          text-align: center;
+          border-bottom: 1px solid #ddd;
+          font-family: 'Abril Fatface', cursive;
+          font-size: 14px;
+          }
+          td {
+          padding: 10px;
+          text-align: center;
+          border-bottom: 1px solid #ddd;
+          }
+          .unicorn_image {
+          max-width: 200px;
+          height: auto;
+          }
+          .rent_button {
+          background: linear-gradient(to right, #7D2E8D, #DE6FA1);
+          color: white;
+          border: none;
+          padding: 10px 20px;
+          text-align: center;
+          text-decoration: none;
+          display: inline-block;
+          font-size: 16px;
+          cursor: pointer;
+          border-radius: 20px;
+          }
+          </style>
+          </head>
+          <body>
+          <header>
+          <h1>Unicorn Rental Portal</h1>
+          </header>
+          <p>Welcome to the Magical Unicorn Rental Service! Here, you can rent a variety of enchanting unicorns for your special events or personal adventures.
+          <br>Browse our catalog of majestic creatures and select the one that best suits your needs.
+          <br>Please note that these majestic creatures are available for rent on a limited basis, and reservations are required.
+          <br>Contact us today to book your magical unicorn experience!</p>
+          <table>
+          <tr>
+          <th>Unicorn Type</th>
+          <th>Image</th>
+          <th>Description</th>
+          <th>Planet of Origin</th>
+          <th>Mileage</th>
+          <th>Rent</th>
+          </tr>
+          <tr>
+          <td>#1 Celestial Unicorn</td>
+          <td><img src="https://ws-assets-prod-iad-r-pdx-f3b3f9f1a7d6a3d0.s3.us-west-2.amazonaws.com/6b77e05c-929d-4b54-9516-3454e46a5c8e/celestial_unicorn.png" alt="Celestial Unicorn" class="unicorn_image"></td>
+          <td>The Celestial Unicorn is a breathtaking creature with a coat that shimmers like the night sky. Its mane and tail are woven with stardust, and its horn glows with a soft, ethereal light. This unicorn is perfect for stargazing adventures or celestial-themed events.</td>
+          <td>Stardust Nebula</td>
+          <td>27,456 km</td>
+          <td><button class="rent_button">RENT</button></td>
+          </tr>
+          <tr>
+          <td>#2 Rainbow Unicorn</td>
+          <td><img src="https://ws-assets-prod-iad-r-pdx-f3b3f9f1a7d6a3d0.s3.us-west-2.amazonaws.com/6b77e05c-929d-4b54-9516-3454e46a5c8e/rainbow_unicorn.png" alt="Rainbow Unicorn" class="unicorn_image"></td>
+          <td>The Rainbow Unicorn is a vibrant and colorful creature that radiates joy and happiness. Its coat is a dazzling array of colors, ranging from fiery reds to deep violets. This unicorn is perfect for children's parties, pride events, or any occasion that calls for a burst of vibrant energy.</td>
+          <td>Prisma Prime</td>
+          <td>18,792 km</td>
+          <td><button class="rent_button">RENT</button></td>
+          </tr>
+          <tr>
+          <td>#3 Forest Unicorn</td>
+          <td><img src="https://ws-assets-prod-iad-r-pdx-f3b3f9f1a7d6a3d0.s3.us-west-2.amazonaws.com/6b77e05c-929d-4b54-9516-3454e46a5c8e/forest_unicorn.png" alt="Forest Unicorn" class="unicorn_image"></td>
+          <td>The Forest Unicorn is a gentle and serene creature that embodies the tranquility of nature. Its coat is a rich, earthy green, and its mane and tail are adorned with leaves and wildflowers. This unicorn is perfect for nature-themed events, woodland weddings, or peaceful retreats.</td>
+          <td>Emerald Glade</td>
+          <td>14,325 km</td>
+          <td><button class="rent_button">RENT</button></td>
+          </tr>
+          <tr>
+          <td>#4 Frost Unicorn</td>
+          <td><img src="https://ws-assets-prod-iad-r-pdx-f3b3f9f1a7d6a3d0.s3.us-west-2.amazonaws.com/6b77e05c-929d-4b54-9516-3454e46a5c8e/frost_unicorn.png" alt="Frost Unicorn" class="unicorn_image"></td>
+          <td>The Frost Unicorn is a majestic and regal creature with a coat that glistens like freshly fallen snow. Its horn is made of pure ice crystal, and its mane and tail shimmer with icy tendrils. This unicorn is perfect for winter wonderland events, ice sculpture exhibitions, or any occasion that calls for a touch of frosty elegance.</td>
+          <td>Crytal Peaks</td>
+          <td>21,987 km</td>
+          <td><button class="rent_button">RENT</button></td>
+          </tr>
+          <tr>
+          <td>#5 Mystic Unicorn</td>
+          <td><img src="https://ws-assets-prod-iad-r-pdx-f3b3f9f1a7d6a3d0.s3.us-west-2.amazonaws.com/6b77e05c-929d-4b54-9516-3454e46a5c8e/mystic_unicorn.png" alt="Mystic Unicorn" class="unicorn_image"></td>
+          <td>The Mystic Unicorn is a mysterious and enchanting creature shrouded in an aura of ancient magic. Its coat is a deep, rich purple, and its horn is adorned with intricate runes and symbols. This unicorn is perfect for mystical ceremonies, fantasy-themed events, or any occasion that celebrates the power of the arcane.</td>
+          <td>Twilight Realm</td>
+          <td>31,654 km</td>
+          <td><button class="rent_button">RENT</button></td>
+          </tr>
+          <tr>
+          <td>#6 Fiery Unicorn</td>
+          <td><img src="https://ws-assets-prod-iad-r-pdx-f3b3f9f1a7d6a3d0.s3.us-west-2.amazonaws.com/6b77e05c-929d-4b54-9516-3454e46a5c8e/fiery_unicorn.png" alt="Fiery Unicorn" class="unicorn_image"></td>
+          <td>The Fiery Unicorn is a captivating and powerful creature that radiates an aura of intense, primal energy. Its coat is a mesmerizing blend of fiery reds, oranges, and yellows, while its horn appears to be forged from molten lava. This unicorn is perfect for bold and daring events, such as celebrations of courage, strength, and the unbridled spirit of adventure.</td>
+          <td>Inferno Isles</td>
+          <td>24,103 km</td>
+          <td><button class="rent_button">RENT</button></td>
+          </tr>
+          </table>
+          </body>
+          </html>
+          EOL
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  AppEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref WebServer
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  # Security Pillar
+  # Problem 1: Publicly accessible database
+  # Problem 2: Hardcoded credentials in the template
+  # Problem 3: No encryption at rest for the database
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows access to the database
+      GroupName: Database-SG
+      VpcId:  !Ref VPC
+      Tags:
+       - Key: Name
+         Value: !Ref EnvironmentName
+       - Key: Application
+         Value: !Ref EnvironmentName
+
+  SGDBIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      CidrIp: 0.0.0.0/0 #This should be restricted to the app tier
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: postgres Server Subnet Group
+      SubnetIds:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  # Reliability Pillar
+  # Problem 1: Single point of failure in the database tier
+  # Problem 2: No failover or backup strategy for the database
+  # Problem 3: Lack of high availability for the database
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Ref DBInstanceIdentifier
+      VPCSecurityGroups:
+        - !GetAtt DBSecurityGroup.GroupId
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBName: mydb
+      Engine: postgres
+      MasterUsername: SuperUnicorn #This should be stored in AWS Secrets Manager
+      MasterUserPassword: SuperSecretPassword123! #This should be stored in AWS Secrets Manager
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      MultiAZ: false #This should be true for production
+      StorageEncrypted: false #This should be true for production
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+  # Problem: Publicly accessible bucket
+  # Problem: No encryption
+  StaticAssetsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub 'static-assets-unicorn-app-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref EnvironmentName
+
+Outputs:
+  InstanceId:
+    Description: InstanceId of the first EC2 instance
+    Value: !Ref WebServer
+
+  PublicDNS:
+    Description: Public DNS Name of the EC2 instance
+    Value: !GetAtt WebServer.PublicDnsName
+
+  WebsiteURL:
+    Value: !Sub http://${AppEIP}
+    Description: WebApp URL
+
+  DatabaseEndpoint:
+    Description: Connection endpoint for the database
+    Value: !GetAtt DBInstance.Endpoint.Address
